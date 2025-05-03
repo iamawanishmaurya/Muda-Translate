@@ -6,6 +6,12 @@ from sklearn.svm import SVC
 import pickle
 import os
 import time
+from flask import Flask, request, jsonify, send_from_directory
+import base64
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import confusion_matrix, classification_report
 
 # Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
@@ -370,51 +376,22 @@ def train_model(data, labels):
         print(f"Error: Need data for at least two different gestures to train. Found only: {unique_labels}")
         return None
 
-    # Check if any class has fewer samples than required for stratification (default is 2 for test_split)
-    min_samples_per_class = 2
-    counts = {label: np.sum(y == label) for label in unique_labels}
-    can_stratify = all(count >= min_samples_per_class for count in counts.values())
+    # Use a pipeline: scaling + SVM
+    pipeline = make_pipeline(StandardScaler(), SVC(kernel='linear', probability=True, random_state=42, C=1.0))
 
-    # Determine test size (e.g., 20%, but ensure at least 1 sample per class in test set if possible)
-    test_size = 0.2
+    # Cross-validation
+    scores = cross_val_score(pipeline, X, y, cv=5)
+    print(f"Cross-validation accuracy: {np.mean(scores):.4f} (+/- {np.std(scores):.4f})")
 
-    print(f"Total samples: {len(X)}")
-    print(f"Gestures: {counts}")
-
-
-    if len(X) < 5 or not can_stratify: # Not enough samples overall or per class for reliable split/stratification
-        print(f"Warning: Few samples or classes with < {min_samples_per_class} samples. Using all data for training, accuracy based on training data.")
-        X_train, X_test, y_train, y_test = X, [], y, [] # No test set
-    else:
-        try:
-             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
-             print(f"Training with {len(X_train)} samples, Testing with {len(X_test)} samples (Stratified).")
-        except ValueError as e:
-             print(f"Warning: Stratified split failed ({e}). Using non-stratified split.")
-             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-             print(f"Training with {len(X_train)} samples, Testing with {len(X_test)} samples (Non-Stratified).")
-
-
-    print("Training SVM model...")
-    # Use probability=True to get confidence scores later
-    model = SVC(kernel='linear', probability=True, random_state=42, C=1.0) # C is regularization parameter
-    try:
-        model.fit(X_train, y_train)
-    except Exception as e:
-        print(f"Error during model training: {e}")
-        return None
-
-    # Evaluate accuracy
-    if len(X_test) > 0:
-        accuracy = model.score(X_test, y_test)
-        print(f"Model accuracy on TEST set: {accuracy:.4f}")
-    else:
-        # If no test set, show training accuracy (likely optimistic)
-        accuracy = model.score(X_train, y_train)
-        print(f"Model accuracy on TRAINING set: {accuracy:.4f}")
-
-
-    return model
+    # Fit on all data
+    pipeline.fit(X, y)
+    # Predict on all data for confusion matrix
+    y_pred = pipeline.predict(X)
+    print("Confusion Matrix:")
+    print(confusion_matrix(y, y_pred))
+    print("Classification Report:")
+    print(classification_report(y, y_pred))
+    return pipeline
 
 # --- Data Management ---
 
@@ -782,7 +759,7 @@ def start_recognition(model):
     last_confidence = 0.0
     display_prediction = "None" # What is shown on screen
 
-    confidence_threshold = 0.70 # Only show prediction if confidence is >= this
+    confidence_threshold = 0.93 # Only show prediction if confidence is >= this
     smoothing_buffer = [] # Optional: for temporal smoothing
     buffer_size = 5       # Optional: number of frames for smoothing
 
@@ -871,14 +848,7 @@ def start_recognition(model):
             display_prediction = current_raw_prediction
             last_confidence = current_confidence
             last_high_conf_prediction = current_raw_prediction # Store the last good one
-        elif any(hands_detected): # Hand detected, but low confidence
-             # Option: Keep showing the last high-confidence prediction
-             display_prediction = f"{last_high_conf_prediction}?" # Add '?' to indicate uncertainty
-             last_confidence = current_confidence # Show the low confidence value
-             # Option: Show 'Uncertain' or 'None'
-             # display_prediction = "Uncertain"
-             # last_confidence = current_confidence
-        else: # No hands detected
+        else: # Below threshold or no hands detected
             display_prediction = "None"
             last_confidence = 0.0
             last_high_conf_prediction = "None"
@@ -954,3 +924,9 @@ if __name__ == "__main__":
         if 'hands' in globals() and hasattr(hands, 'close'):
              hands.close()
         print("\nProgram finished.")
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return send_from_directory('web', 'index.html')
